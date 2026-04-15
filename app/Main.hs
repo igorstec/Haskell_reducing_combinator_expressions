@@ -55,10 +55,12 @@ transMatch :: HsMatch -> Def
 transMatch (HsMatch _ name pats rhs _) = Def (transName name) (map transPat pats) (transRhs rhs)
 
 transName :: HsName -> Name
-transName = show
+transName (HsIdent nazwa)  = nazwa
+transName (HsSymbol nazwa) = nazwa
 
-transPat ::HsPat -> Pat
-transPat = show
+transPat :: HsPat -> Pat
+transPat (HsPVar nazwa) = transName nazwa
+transPat _ = error "Oczekiwano zwyklej zmiennej jako argumentu!"
 
 transRhs :: HsRhs -> Expr
 transRhs (HsUnGuardedRhs expr) = transExp expr
