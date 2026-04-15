@@ -1,62 +1,57 @@
 module Main where
 
 import qualified Data.Map as Map
-import System.Environment (getArgs)
-
-import Language.Haskell.Syntax
 import Language.Haskell.Parser
---import Data.Type.Coercion (trans)
+import Language.Haskell.Syntax
+import System.Environment (getArgs)
 
 infixl 9 :$
 
 -- Opis danych w jaki sposób chcemy miec dane naszego programu w formie definicji funkcji DEF zawarte w liscie o nazwie
--- Prog, sama funkcja ma miec nazwe stringa liste argumentów [Pat] i ciao funckji Expr które jest drzewem binarnym
+-- Prog, sama funkcja ma miec nazwe stringa liste argumentów [Pat] i ciłao funckji Expr które jest drzewem binarnym
 data Def = Def Name [Pat] Expr deriving (Show)
+
 data Expr = Var Name | Expr :$ Expr deriving (Show)
+
 type Pat = Name
+
 type Name = String
 
 newtype Prog = Prog {progDefs :: [Def]} deriving (Show)
 
--- Ta funckja zamienia liste Prog którą musimy stworzyc z danych na mape definicji funkcji
+-- Ta funckcja zamienia liste Prog na mape definicji funkcji
 type DefMap = Map.Map Name Def
 
 buildDefMap :: Prog -> DefMap
-buildDefMap (Prog defs) = Map.fromList [ (name, d) | d@(Def name _ _) <- defs ]
+buildDefMap (Prog defs) = Map.fromList [(name, d) | d@(Def name _ _) <- defs]
 
--- Funkcja która zamienia skladnie podzbioru haskela na string w formie ktora nas interesuje
--- To bedzie dlugir ja mam stringa kombinatorw chce je dac na hsmodule to ParseResult HSModule itd. az [Def]
+-- Funkcja która zamienia skladnie podzbioru haskela w forme która nas intersuje Prog
 fromHsString :: String -> Prog
 fromHsString = Prog . fromParseResult . parseModule
 
 fromParseResult :: ParseResult HsModule -> [Def]
 fromParseResult x = case x of
-    ParseOk hsModule -> fromHsModule hsModule
-    ParseFailed errloc err -> error $ "Blad parsowania: " ++ err ++ " w miejscu" ++ show errloc ++ "\n"
+  ParseOk hsModule -> fromHsModule hsModule
+  ParseFailed errloc err -> error $ "Blad parsowania: " ++ err ++ " w miejscu" ++ show errloc ++ "\n"
 
-
---Tu dostaje juz duzy skomplikowany HsModule i musze go przerobic na liste Def, czyli na nasz wewnetrzny format
--- Nasz Prog to opakowanie na liste Def, a Def to nazwa funkcji, lista argumentów i ciało funkcji, czyli Expr
--- zakładamy ze naazwy funkcji sa unikalne, a argumenty sa niepowtarzajace sie. w jednej definijcii funkcji nie moze byc powtarzajacych sie argumentow, ale w roznych definicjach juz tak
---HsModule SrcLoc Module (Maybe [HsExportSpec]) [HsImportDecl] [HsDecl]	 
+-- Tu mamy juz duzy skomplikowany HsModule i trzeba go przerobic na liste Def, czyli na nasz wewnetrzny format
+-- HsModule SrcLoc Module (Maybe [HsExportSpec]) [HsImportDecl] [HsDecl]
 
 fromHsModule :: HsModule -> [Def]
 fromHsModule (HsModule _ _ _ _ decls) = concatMap transDecl decls
 
--- Nasza funkcja pomocnicza:
 transDecl :: HsDecl -> [Def]
 transDecl (HsFunBind matches) = map transMatch matches
-transDecl (HsPatBind _ (HsPVar nazwa) rhs _) = [Def (transName nazwa) [] (transRhs rhs)] 
-transDecl _                   = []  -- Ignorujemy wszystko inne! Zwracamy pustą listę.
+transDecl (HsPatBind _ (HsPVar nazwa) rhs _) = [Def (transName nazwa) [] (transRhs rhs)]
+transDecl _ = []
 
+-- HsMatch SrcLoc HsName [HsPat] HsRhs [HsDecl]
 
---HsMatch SrcLoc HsName [HsPat] HsRhs [HsDecl]	 
---data Def = Def Name [Pat] Expr
 transMatch :: HsMatch -> Def
 transMatch (HsMatch _ name pats rhs _) = Def (transName name) (map transPat pats) (transRhs rhs)
 
 transName :: HsName -> Name
-transName (HsIdent nazwa)  = nazwa
+transName (HsIdent nazwa) = nazwa
 transName (HsSymbol nazwa) = nazwa
 
 transPat :: HsPat -> Pat
@@ -74,89 +69,98 @@ transExp (HsParen srodek) = transExp srodek
 transExp (HsCon (UnQual (HsIdent nazwa))) = Var nazwa
 transExp _ = error "Skladnia nieobslugiwana w tym jezyku!"
 
+rozbij :: Expr -> (Expr, [Expr])
+rozbij expr = go expr []
+  where
+    go (a :$ b) acc = go a (b : acc)
+    go reszta acc = (reszta, acc)
 
--- subst :: (Name, Expr) -> Expr -> Expr
--- subst (n, e) (Var x) | x == n    = e
--- subst _ (Var x)                 = Var x
+-- Podstawia jedno konkretne wyrażenie w miejsce wybranej zmiennej
+subst :: (Name, Expr) -> Expr -> Expr
+subst (cel, noweWyrazenie) (Var nazwa)
+  | nazwa == cel = noweWyrazenie
+  | otherwise = Var nazwa
+subst podstawienie (lewe :$ prawe) =
+  subst podstawienie lewe :$ subst podstawienie prawe
 
+-- Przemianowuje argumenty funkcji na bezpieczne (dodając znak '#'),
+-- aby uniknąć problemu kolizji i przechwytywania zmiennych.
+alphaRename :: [Name] -> Expr -> ([Name], Expr)
+alphaRename [] cialo = ([], cialo)
+alphaRename (p : ps) cialo =
+  let nowaNazwa = "#" ++ p
+      noweCialo = subst (p, Var nowaNazwa) cialo
+      (resztaParametrow, ostateczneCialo) = alphaRename ps noweCialo
+   in (nowaNazwa : resztaParametrow, ostateczneCialo)
 
--- Ścieżka redukcji
-rpath :: Expr -> [Expr]
-rpath e = e : maybe [] rpath (rstep e)
+-- Pojedynczy krok redukcji
+rstep :: DefMap -> Expr -> Maybe Expr
+rstep mapa expr =
+  let (glowa, argumenty) = rozbij expr
+   in case glowa of
+        -- Jeśli głowa to zmienna, szukamy jej w słowniku:
+        Var nazwa -> case Map.lookup nazwa mapa of
+          Just (Def _ parametry cialo) ->
+            if length argumenty >= length parametry
+              then
+                let (bezpieczneParametry, bezpieczneCialo) = alphaRename parametry cialo
+                    -- Wycinamy tylko te argumenty, które funkcja faktycznie "zje"
+                    uzyteArgumenty = take (length parametry) argumenty
+                    resztaArgumentow = drop (length parametry) argumenty
 
--- Pojedyńcze przejście
-rstep :: Expr -> Maybe Expr
-rstep (Var "i" :$ x) = Just x
-rstep _              = Nothing
+                    -- Łączymy w pary: parametr -> argument, np. [("#x", K), ("#y", I)]
+                    paryDoPodstawienia = zip bezpieczneParametry uzyteArgumenty
 
-prettyDef :: Def -> String
-prettyDef (Def name args body) =
-    name ++ " " ++ unwords args ++ " = " ++ prettyExpr body
+                    zredukowaneCialo = foldl (\aktCialo para -> subst para aktCialo) bezpieczneCialo paryDoPodstawienia
 
-prettyDefnoDecl :: Def -> String
-prettyDefnoDecl (Def _ _ body) =
-    prettyExpr body
+                    ostatecznyWynik = foldl (:$) zredukowaneCialo resztaArgumentow
+                 in Just ostatecznyWynik
+              else
+                szukajGdzieIndziej expr
+          Nothing ->
+            -- To sie nie zdarzy, bo wszystkie zmienne powinny byc zdefiniowane, ale na wszelki wypadek
+            szukajGdzieIndziej expr
+        _ ->
+          -- Głowa nie jest zmienna wiec szukamy dalej w drzewie
+          szukajGdzieIndziej expr
+  where
+    -- Funkcja wędrująca po drzewie w poszukiwaniu miejsca do redukcji
+    szukajGdzieIndziej (a :$ b) = case rstep mapa a of
+      Just a' -> Just (a' :$ b) -- Najpierw próbujemy zredukować lewą stronę
+      Nothing -> case rstep mapa b of
+        Just b' -> Just (a :$ b')
+        Nothing -> Nothing -- Obie strony to postać normalna
+    szukajGdzieIndziej _ = Nothing -- Same zmienne i liście
+
+rpath :: DefMap -> Expr -> [Expr]
+rpath mapa e = e : maybe [] (rpath mapa) (rstep mapa e)
+
+printPath :: DefMap -> Expr -> IO ()
+printPath mapa = mapM_ (putStrLn . prettyExpr) . take 30 . rpath mapa
 
 prettyExpr :: Expr -> String
 prettyExpr = go False
   where
-    go _ (Var name)       = name
+    go _ (Var name) = name
     go p (a :$ b) = paren p (go False a ++ " " ++ go True b)
-    paren True  s = "(" ++ s ++ ")"
+    paren True s = "(" ++ s ++ ")"
     paren False s = s
-
--- Wypisuje listę wyrażeń, każde w osobnej linii
-printExprs :: [Expr] -> IO ()
-printExprs = mapM_ (putStrLn . prettyExpr)
-
--- rstep :: Expr -> Maybe Expr
--- rstep (I :$ x)                = Just x
--- rstep ((K :$ x) :$ _)         = Just x
--- rstep (((S :$ x) :$ y) :$ z)  = Just ((x :$ z) :$ (y :$ z))
--- rstep (((B :$ x) :$ y) :$ z)  = Just (x :$ (y :$ z))
--- rstep (a :$ b) = case rstep a of
---     Just a' -> Just (a' :$ b)
---     Nothing -> case rstep b of
---         Just b' -> Just (a :$ b')
---         Nothing -> Nothing
--- rstep _ = Nothing
-
--- Sciezka refukcji
-
-printPath :: Expr -> IO ()
-printPath = printExprs . take 30 . rpath
-
 
 -- GŁÓWNA FUNKCJA PROGRAMU
 main :: IO ()
 main = do
-    args <- getArgs
-    case args of
-        [plik] -> do
-            -- Wczytujemy zawartość pliku do zmiennej typu String
-            kodZrodlowy <- readFile plik
-            
-            -- Tutaj w przyszłości połączysz to z parserem, np.:
-            let definicje = fromHsString kodZrodlowy
+  args <- getArgs
+  case args of
+    [plik] -> do
+      -- Wczytujemy zawartość pliku do zmiennej typu String
+      kodZrodlowy <- readFile plik
 
-            putStrLn "--- Zbudowano strukturę Prog ---"
-            print definicje
+      let definicje = fromHsString kodZrodlowy
 
-            let mapa = buildDefMap definicje
-            putStrLn "Zbudowano mapę!"
+      let mapa = buildDefMap definicje
 
+      let (Def _ _ myexpr) = mapa Map.! "main"
 
-            
-            -- Na razie tylko potwierdzamy, że plik się wczytał:
-            putStrLn $ "Udalo sie wczytac plik: " ++ plik
-            putStrLn "Oto jego zawartosc:"
-            putStrLn kodZrodlowy
-
-            putStrLn "--- Sciezka redukcji brzmi: ---"
-            let myexpr = mapa Map.! "main"  -- Przykładowo bierzemy definicję funkcji "main"
-            putStrLn "--- Najpierw main: ---"
-            putStrLn $ prettyDefnoDecl myexpr
-
-            
-        _ -> 
-            putStrLn "Blad argumentow."
+      printPath mapa myexpr
+    _ ->
+      putStrLn "Blad argumentow."
