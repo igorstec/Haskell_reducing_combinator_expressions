@@ -69,68 +69,68 @@ transExp (HsParen srodek) = transExp srodek
 transExp (HsCon (UnQual (HsIdent nazwa))) = Var nazwa
 transExp _ = error "Skladnia nieobslugiwana w tym jezyku!"
 
-rozbij :: Expr -> (Expr, [Expr])
-rozbij expr = go expr []
+flattenApp :: Expr -> (Expr, [Expr])
+flattenApp expr = go expr []
   where
     go (a :$ b) acc = go a (b : acc)
-    go reszta acc = (reszta, acc)
+    go rest acc = (rest, acc)
 
 -- Podstawia jedno konkretne wyrażenie w miejsce wybranej zmiennej
 subst :: (Name, Expr) -> Expr -> Expr
-subst (cel, noweWyrazenie) (Var nazwa)
-  | nazwa == cel = noweWyrazenie
-  | otherwise = Var nazwa
-subst podstawienie (lewe :$ prawe) =
-  subst podstawienie lewe :$ subst podstawienie prawe
+subst (target, newExpr) (Var name)
+  | name == target = newExpr
+  | otherwise = Var name
+subst sub (left :$ right) =
+  subst sub left :$ subst sub right
 
 -- Przemianowuje argumenty funkcji na bezpieczne (dodając znak '#'),
 -- aby uniknąć problemu kolizji i przechwytywania zmiennych.
 alphaRename :: [Name] -> Expr -> ([Name], Expr)
-alphaRename [] cialo = ([], cialo)
-alphaRename (p : ps) cialo =
-  let nowaNazwa = "#" ++ p
-      noweCialo = subst (p, Var nowaNazwa) cialo
-      (resztaParametrow, ostateczneCialo) = alphaRename ps noweCialo
-   in (nowaNazwa : resztaParametrow, ostateczneCialo)
+alphaRename [] body = ([], body)
+alphaRename (p : ps) body =
+  let newName = "#" ++ p
+      newBody = subst (p, Var newName) body
+      (restParams, finalBody) = alphaRename ps newBody
+   in (newName : restParams, finalBody)
 
 -- Pojedynczy krok redukcji
 rstep :: DefMap -> Expr -> Maybe Expr
-rstep mapa expr =
-  let (glowa, argumenty) = rozbij expr
-   in case glowa of
+rstep defMap expr =
+  let (headExpr, args) = flattenApp expr
+   in case headExpr of
         -- Jeśli głowa to zmienna, szukamy jej w słowniku:
-        Var nazwa -> case Map.lookup nazwa mapa of
-          Just (Def _ parametry cialo) ->
-            if length argumenty >= length parametry
+        Var name -> case Map.lookup name defMap of
+          Just (Def _ params body) ->
+            if length args >= length params
               then
-                let (bezpieczneParametry, bezpieczneCialo) = alphaRename parametry cialo
+                let (safeParams, safeBody) = alphaRename params body
                     -- Wycinamy tylko te argumenty, które funkcja faktycznie "zje"
-                    uzyteArgumenty = take (length parametry) argumenty
-                    resztaArgumentow = drop (length parametry) argumenty
+                    usedArgs = take (length params) args
+                    restArgs = drop (length params) args
 
                     -- Łączymy w pary: parametr -> argument, np. [("#x", K), ("#y", I)]
-                    paryDoPodstawienia = zip bezpieczneParametry uzyteArgumenty
+                    substPairs = zip safeParams usedArgs
 
-                    zredukowaneCialo = foldl (\aktCialo para -> subst para aktCialo) bezpieczneCialo paryDoPodstawienia
+                    reducedBody = foldl (\currBody pair -> subst pair currBody) safeBody substPairs
 
-                    ostatecznyWynik = foldl (:$) zredukowaneCialo resztaArgumentow
-                 in Just ostatecznyWynik
+                    finalResult = foldl (:$) reducedBody restArgs
+                 in Just finalResult
               else
-                szukajGdzieIndziej expr
+                searchElsewhere expr
           Nothing ->
             -- To sie nie zdarzy, bo wszystkie zmienne powinny byc zdefiniowane, ale na wszelki wypadek
-            szukajGdzieIndziej expr
+            searchElsewhere expr
         _ ->
           -- Głowa nie jest zmienna wiec szukamy dalej w drzewie
-          szukajGdzieIndziej expr
+          searchElsewhere expr
   where
     -- Funkcja wędrująca po drzewie w poszukiwaniu miejsca do redukcji
-    szukajGdzieIndziej (a :$ b) = case rstep mapa a of
+    searchElsewhere (a :$ b) = case rstep defMap a of
       Just a' -> Just (a' :$ b) -- Najpierw próbujemy zredukować lewą stronę
-      Nothing -> case rstep mapa b of
+      Nothing -> case rstep defMap b of
         Just b' -> Just (a :$ b')
         Nothing -> Nothing -- Obie strony to postać normalna
-    szukajGdzieIndziej _ = Nothing -- Same zmienne i liście
+    searchElsewhere _ = Nothing -- Same zmienne i liście
 
 rpath :: DefMap -> Expr -> [Expr]
 rpath mapa e = e : maybe [] (rpath mapa) (rstep mapa e)
@@ -155,9 +155,9 @@ main = do
       -- Wczytujemy zawartość pliku do zmiennej typu String
       kodZrodlowy <- readFile plik
 
-      let definicje = fromHsString kodZrodlowy
+      let definitions = fromHsString kodZrodlowy
 
-      let mapa = buildDefMap definicje
+      let mapa = buildDefMap definitions
 
       let (Def _ _ myexpr) = mapa Map.! "main"
 
