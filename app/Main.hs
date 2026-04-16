@@ -1,5 +1,6 @@
 module Main where
 
+import Data.List (nub)
 import qualified Data.Map as Map
 import Language.Haskell.Parser
 import Language.Haskell.Syntax
@@ -27,7 +28,7 @@ buildDefMap (Prog defs) = Map.fromList [(name, d) | d@(Def name _ _) <- defs]
 
 -- Funkcja która zamienia skladnie podzbioru haskela w forme która nas intersuje Prog
 fromHsString :: String -> Prog
-fromHsString = Prog . fromParseResult . parseModule
+fromHsString = validateProg . Prog . fromParseResult . parseModule
 
 fromParseResult :: ParseResult HsModule -> [Def]
 fromParseResult x = case x of
@@ -146,7 +147,42 @@ prettyExpr = go False
     paren True s = "(" ++ s ++ ")"
     paren False s = s
 
--- GŁÓWNA FUNKCJA PROGRAMU
+-- Główna funkcja walidująca cały program
+validateProg :: Prog -> Prog
+validateProg (Prog defs) =
+  Prog (checkMain . checkUniqueArgs . checkUniqueDefs $ defs)
+
+checkUniqueDefs :: [Def] -> [Def]
+checkUniqueDefs defs =
+  let nazwy = map (\(Def nazwa _ _) -> nazwa) defs
+
+      findDup [] = Nothing
+      findDup (x : xs) = if x `elem` xs then Just x else findDup xs
+   in case findDup nazwy of
+        Just dup -> error $ "Blad Poprawnosci"
+        Nothing -> defs
+
+checkUniqueArgs :: [Def] -> [Def]
+checkUniqueArgs defs =
+  -- Wyłapujemy te definicje, w których liczba unikalnych argumentów (nub)
+  -- jest inna niż całkowita liczba argumentów
+  let badDefs = filter (\(Def _ argumenty _) -> length (nub argumenty) /= length argumenty) defs
+   in case badDefs of
+        (Def nazwa _ _ : _) -> error $ "Blad Poprawnosci: Kombinator"
+        [] -> defs
+
+-- Sprawdza, czy istnieje 'main' i czy nie ma argumentów
+checkMain :: [Def] -> [Def]
+checkMain defs =
+  let mainDefs = filter (\(Def nazwa _ _) -> nazwa == "main") defs
+   in case mainDefs of
+        [] -> error "Blad Poprawnosci: Program nie zawiera definicji 'main'!"
+        [Def _ argumenty _] ->
+          if null argumenty
+            then defs
+            else error "Blad Poprawnosci"
+        _ -> defs -- Przypadek wielu 'main' zostanie i tak wyłapany przez checkUniqueDefs
+
 main :: IO ()
 main = do
   args <- getArgs
